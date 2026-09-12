@@ -1,5 +1,11 @@
 # Voice Stick
 
+> **This repository is a community port of [78/voicestick](https://github.com/78/voicestick)
+> by Terrence (MIT License) to the Alientek ATK-DNESP32S3-BOX0.** The upstream firmware
+> sources, desktop apps, and license are retained; only the ESP-IDF board layer and the
+> display assets were adapted. Hardware differences are listed under
+> [ATK-DNESP32S3-BOX0 Port](#atk-dnesp32s3-box0-port).
+
 Voice Stick turns an M5Stack StickS3 into a Bluetooth push-to-talk input device for macOS.
 
 Hold the front button on the StickS3 to record. When you release it, the macOS menu bar app sends the audio to ASR, shows the recognized text, and pastes the final result into the currently focused input field after a short confirmation countdown. By default it pastes text and presses Return; `auto_enter` can be disabled in settings.

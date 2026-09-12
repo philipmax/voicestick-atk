@@ -5,7 +5,9 @@
 #define CAT_ICON_SIZE 112
 #define CAT_ICON_STRIDE (CAT_ICON_SIZE * 4)
 #define CAT_ICON_DATA_SIZE (CAT_ICON_SIZE * CAT_ICON_STRIDE)
-#define CAT_ICON_TOP_Y 42
+/* 240x240 screen: keep the 112x112 source images at 1:1 (no rescale) and
+ * center them horizontally, leaving room below for status/hint text. */
+#define CAT_ICON_TOP_Y 48
 
 extern const uint8_t cat_pairing_start[] asm("_binary_cat_pairing_argb8888_bin_start");
 extern const uint8_t cat_ready_start[] asm("_binary_cat_ready_argb8888_bin_start");

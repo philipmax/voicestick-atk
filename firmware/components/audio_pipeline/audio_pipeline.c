@@ -87,10 +87,14 @@ static esp_err_t init_i2s(void)
 
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_SAMPLE_RATE),
+        /* ATK-DNESP32S3-BOX0 drives ES8311 with BCLK as its clock source
+         * (no dedicated MCLK pin), so the slot must stay STEREO: with MONO
+         * the BCLK would drop to 16*fs = 256kHz, too low for the ES8311 PLL.
+         * The codec layer downmixes to a single channel for us. */
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                        I2S_SLOT_MODE_MONO),
+                                                        I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
-            .mclk = STICK_S3_PIN_ES8311_MCLK,
+            .mclk = I2S_GPIO_UNUSED,
             .bclk = STICK_S3_PIN_ES8311_BCLK,
             .ws = STICK_S3_PIN_ES8311_LRCK,
             .dout = STICK_S3_PIN_ES8311_DIN,
@@ -116,7 +120,7 @@ static esp_err_t init_codec(void)
     ESP_RETURN_ON_FALSE(i2c_bus != NULL, ESP_ERR_INVALID_STATE, TAG, "i2c bus unavailable");
 
     audio_codec_i2c_cfg_t i2c_cfg = {
-        .port = I2C_NUM_1,
+        .port = I2C_NUM_0,
         .addr = ES8311_CODEC_DEFAULT_ADDR,
         .bus_handle = i2c_bus,
     };
@@ -141,7 +145,9 @@ static esp_err_t init_codec(void)
         .pa_pin = -1,
         .pa_reverted = false,
         .master_mode = false,
-        .use_mclk = true,
+        /* ATK board has no MCLK wire to the ES8311; the codec derives its
+         * clock from BCLK, matching the upstream xiaozhi board config. */
+        .use_mclk = false,
         .digital_mic = false,
         .invert_mclk = false,
         .invert_sclk = false,

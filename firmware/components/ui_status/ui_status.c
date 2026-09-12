@@ -27,10 +27,11 @@ static const char *TAG = "ui_status";
 
 #define LCD_HOST SPI2_HOST
 
-#define LCD_H_RES 135
+#define LCD_H_RES 240
 #define LCD_V_RES 240
-#define LCD_X_GAP 52
-#define LCD_Y_GAP 40
+/* ATK 240x240 ST7789 has no memory-gap offset */
+#define LCD_X_GAP 0
+#define LCD_Y_GAP 0
 
 #define LCD_PIXEL_CLOCK_HZ (20 * 1000 * 1000)
 #define LCD_CMD_BITS 8
@@ -239,6 +240,7 @@ static void create_status_ui(void)
     lv_obj_set_style_text_color(s_status_label, lv_color_hex(0x3f3440), 0);
     lv_obj_set_width(s_status_label, LCD_H_RES - 16);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_CENTER, 0);
+    /* 240x240: icon occupies y=48..160, put status text right below it */
     lv_obj_align(s_status_label, LV_ALIGN_TOP_MID, 0, 168);
 
     s_hint_label = lv_label_create(s_screen);

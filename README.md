@@ -4,6 +4,34 @@ Voice Stick turns an M5Stack StickS3 into a Bluetooth push-to-talk input device 
 
 Hold the front button on the StickS3 to record. When you release it, the macOS menu bar app sends the audio to ASR, shows the recognized text, and pastes the final result into the currently focused input field after a short confirmation countdown. By default it pastes text and presses Return; `auto_enter` can be disabled in settings.
 
+## ATK-DNESP32S3-BOX0 Port
+
+This repository is a port of [78/voicestick](https://github.com/78/voicestick) to the
+Alientek ATK-DNESP32S3-BOX0, tested on real hardware. The upstream desktop apps, protocol
+docs, and MIT license are kept unchanged; the ESP-IDF firmware board layer and the display
+assets were adapted to the new hardware.
+
+| Item | Upstream StickS3 target | ATK-DNESP32S3-BOX0 (this port) |
+| --- | --- | --- |
+| Board | M5Stack StickS3 / ESP32-S3-PICO-1-N8R8 | ATK-DNESP32S3-BOX0, 8 MB QIO flash + 8 MB octal PSRAM |
+| Buttons | front GPIO11, side GPIO12 | right GPIO0 `primary` PTT, left GPIO3 `secondary`, middle GPIO4 (active high, long press powers the board off) |
+| Display | 135 x 240 ST7789P3 | 240 x 240 ST7789 (MOSI 40, SCK 39, DC 38, CS 41, RST unused, BL 42) |
+| Audio | ES8311 over I2S, 16 kHz / 16 bit / mono | same codec without MCLK: the clock is recovered from BCLK, so the I2S slot must stay stereo. BCLK 5, WS 10, codec DSDIN 9, codec ASDOUT 6, I2C SCL 12 / SDA 11, codec power GPIO14 |
+| Power | M5PM1 PMIC over I2C | no PMIC: power hold `SYS_POW` GPIO2 (low = off), battery ADC `BAT_VSEN` GPIO1 behind `CHG_CTRL` GPIO47, charge status GPIO48, shutdown sequence `CHG_CTRL=0` then `SYS_POW=0`, speaker PA GPIO21 unused |
+
+Port-specific firmware behavior:
+
+- Idle deep sleep is disabled (`DEEP_SLEEP_ON_IDLE 0`) and automatic light sleep stays off.
+  This board has no VBUS sense line, so a USB-powered unit with a full battery looks
+  battery-powered, and both sleep modes drop the USB-Serial-JTAG console.
+- Battery percentage uses a 3-sample moving average over the `CHG_CTRL`-gated ADC divider,
+  matching the averaging in the upstream `PowerManager`.
+- The console stays on USB-Serial-JTAG (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`). Over this
+  USB path esptool's RTS hard reset does not start the application, so press the board
+  reset button after flashing.
+
+Pin definitions live in `firmware/components/stick_s3_board/include/stick_s3_board.h`.
+
 ## Project Layout
 
 - `firmware/`: ESP-IDF firmware for M5Stack StickS3 / ESP32-S3.
@@ -31,6 +59,9 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - The firmware screen shows pairing, ready, listening, thinking, pending confirmation, error, and battery states based on app-sent `ui_state` updates. It dims after 30 seconds of inactivity. On battery power it enters deep sleep after 5 minutes; while charging or USB powered it stays at the dimmed-screen stage. The front button wakes it from deep sleep.
 
 ## Hardware Target
+
+The upstream M5Stack StickS3 target, kept for reference. The board supported by this
+repository is described in [ATK-DNESP32S3-BOX0 Port](#atk-dnesp32s3-box0-port).
 
 - Board: M5Stack StickS3 / ESP32-S3-PICO-1-N8R8
 - Front button: GPIO11, protocol `primary`, push-to-talk and deep-sleep wake

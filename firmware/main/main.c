@@ -33,6 +33,11 @@ static const char *TAG = "voice_stick";
 #define BATTERY_REFRESH_FALLBACK_US (BATTERY_REFRESH_FALLBACK_MS * 1000ULL)
 #define DEEP_SLEEP_TIMEOUT_MS (5 * 60 * 1000)
 #define DEEP_SLEEP_TIMEOUT_US (DEEP_SLEEP_TIMEOUT_MS * 1000ULL)
+/* The ATK board has no VBUS sense line, so a USB-powered unit with a full
+ * battery looks exactly like a battery-powered one and would drop off the
+ * USB bus every idle period. Keep idle sleep off until a power-source check
+ * is available; set to 1 to restore the upstream behaviour. */
+#define DEEP_SLEEP_ON_IDLE 0
 
 static bool s_recording;
 static bool s_ota_updating;
@@ -50,6 +55,8 @@ static uint32_t s_session_id = 1;
 static QueueHandle_t s_app_event_queue;
 static button_handle_t s_front_button;
 static button_handle_t s_side_button;
+static button_handle_t s_power_button;
+static bool s_power_off_pending;
 static int64_t s_primary_down_us;
 static int64_t s_secondary_down_us;
 static uint32_t s_primary_session_id;
@@ -93,10 +100,10 @@ typedef enum {
     APP_EVENT_FRONT_UP,
     APP_EVENT_SIDE_DOWN,
     APP_EVENT_SIDE_UP,
+    APP_EVENT_POWER_OFF,
     APP_EVENT_UI_STATE,
     APP_EVENT_BLE_CONNECTED,
     APP_EVENT_BLE_DISCONNECTED,
-    APP_EVENT_POWER_IRQ,
     APP_EVENT_BATTERY_REFRESH,
     APP_EVENT_ENTER_DEEP_SLEEP,
     APP_EVENT_OTA_BEGIN,
@@ -215,6 +222,12 @@ static void restart_deep_sleep_timer(void)
     }
 
     (void)esp_timer_stop(s_deep_sleep_timer);
+
+#if !DEEP_SLEEP_ON_IDLE
+    /* Idle sleep disabled: keep the USB console alive during bring-up. */
+    return;
+#endif
+
     if (!s_recording && !s_ota_updating && !is_external_powered()) {
         esp_err_t err = esp_timer_start_once(s_deep_sleep_timer, DEEP_SLEEP_TIMEOUT_US);
         if (err != ESP_OK) {
@@ -334,6 +347,42 @@ static void enter_deep_sleep(void)
     esp_deep_sleep_start();
 }
 
+static void power_off(void)
+{
+    ESP_LOGW(TAG, "power key: shutting down");
+
+    if (s_display_dim_timer) {
+        (void)esp_timer_stop(s_display_dim_timer);
+    }
+    if (s_deep_sleep_timer) {
+        (void)esp_timer_stop(s_deep_sleep_timer);
+    }
+    if (s_battery_refresh_timer) {
+        (void)esp_timer_stop(s_battery_refresh_timer);
+    }
+    stop_host_response_timer();
+
+    (void)ui_status_set_brightness(0);
+    ui_status_prepare_deep_sleep();
+
+    /* Release the power hold; on battery power this cuts the rail outright. */
+    stick_s3_board_power_off();
+
+    /* Still running means the board is USB powered and the rail held. Fall
+     * back to deep sleep so the device still behaves as "off"; the power key
+     * (active high) wakes it again. */
+    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+    (void)rtc_gpio_pulldown_dis(STICK_S3_PIN_BUTTON_POWER);
+    (void)rtc_gpio_pullup_dis(STICK_S3_PIN_BUTTON_POWER);
+    (void)esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+    if (esp_sleep_enable_ext1_wakeup_io(1ULL << STICK_S3_PIN_BUTTON_POWER,
+                                        ESP_EXT1_WAKEUP_ANY_HIGH) == ESP_OK) {
+        ESP_LOGW(TAG, "USB powered, entering deep sleep instead of power off");
+        esp_deep_sleep_start();
+    }
+    ESP_LOGE(TAG, "power off failed, staying on");
+}
+
 static bool app_ui_allows_recording_start(void)
 {
     return s_app_ui_state != APP_UI_STATE_PENDING_CONFIRMATION;
@@ -407,18 +456,6 @@ static void queue_app_event_with_ota(app_event_type_t type, uint32_t written, ui
     }
 }
 
-static void queue_app_event_from_isr(app_event_type_t type, BaseType_t *high_task_woken)
-{
-    if (s_app_event_queue) {
-        app_event_t event = {
-            .type = type,
-            .written = 0,
-            .size = 0,
-        };
-        (void)xQueueSendFromISR(s_app_event_queue, &event, high_task_woken);
-    }
-}
-
 static void queue_ui_state_event(const char *state, const char *text)
 {
     if (!s_app_event_queue) {
@@ -474,6 +511,30 @@ static void side_button_up_cb(void *button_handle, void *usr_data)
     (void)button_handle;
     (void)usr_data;
     queue_app_event(APP_EVENT_SIDE_UP);
+}
+
+/* M_BUTTON is the power key. The long press only arms the shutdown: the
+ * actual power-off runs on release, so the pin is no longer asserted when
+ * the rail drops. That matters because the key is also the deep-sleep wake
+ * source when the board is running from USB power. */
+static void power_button_long_press_cb(void *button_handle, void *usr_data)
+{
+    (void)button_handle;
+    (void)usr_data;
+    s_power_off_pending = true;
+    ESP_LOGW(TAG, "power key long press: release to power off");
+    ui_status_set_error("Power Off");
+}
+
+static void power_button_up_cb(void *button_handle, void *usr_data)
+{
+    (void)button_handle;
+    (void)usr_data;
+    if (!s_power_off_pending) {
+        return;
+    }
+    s_power_off_pending = false;
+    queue_app_event(APP_EVENT_POWER_OFF);
 }
 
 static void ble_connection_cb(bool connected)
@@ -686,9 +747,9 @@ static void app_event_task(void *arg)
             release_ota_pm_locks();
             ui_status_set_pairing(voice_ble_device_name());
             break;
-        case APP_EVENT_POWER_IRQ:
-            gpio_intr_enable(STICK_S3_PIN_PMIC_IRQ);
-            /* fall through */
+        case APP_EVENT_POWER_OFF:
+            power_off();
+            break;
         case APP_EVENT_BATTERY_REFRESH:
             update_battery_status();
             break;
@@ -735,12 +796,13 @@ static void app_event_task(void *arg)
     }
 }
 
-static esp_err_t init_gpio_button(gpio_num_t gpio_num, button_handle_t *button)
+static esp_err_t init_gpio_button(gpio_num_t gpio_num, uint8_t active_level,
+                                  button_handle_t *button)
 {
     const button_config_t button_config = {0};
     const button_gpio_config_t gpio_config = {
         .gpio_num = gpio_num,
-        .active_level = 0,
+        .active_level = active_level,
         .enable_power_save = true
     };
 
@@ -754,11 +816,17 @@ static esp_err_t init_buttons(void)
         return ESP_ERR_NO_MEM;
     }
 
-    esp_err_t err = init_gpio_button(STICK_S3_PIN_BUTTON_FRONT, &s_front_button);
+    /* R_BUTTON and L_BUTTON are active low, M_BUTTON (power) is active high */
+    esp_err_t err = init_gpio_button(STICK_S3_PIN_BUTTON_PRIMARY, 0, &s_front_button);
     if (err != ESP_OK) {
         return err;
     }
-    err = init_gpio_button(STICK_S3_PIN_BUTTON_SIDE, &s_side_button);
+    err = init_gpio_button(STICK_S3_PIN_BUTTON_SECONDARY, 0, &s_side_button);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = init_gpio_button(STICK_S3_PIN_BUTTON_POWER,
+                           STICK_S3_POWER_BUTTON_PRESSED_LEVEL, &s_power_button);
     if (err != ESP_OK) {
         return err;
     }
@@ -780,6 +848,16 @@ static esp_err_t init_buttons(void)
     }
     err = iot_button_register_cb(s_side_button, BUTTON_PRESS_UP, NULL,
                                  side_button_up_cb, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = iot_button_register_cb(s_power_button, BUTTON_LONG_PRESS_START, NULL,
+                                 power_button_long_press_cb, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = iot_button_register_cb(s_power_button, BUTTON_PRESS_UP, NULL,
+                                 power_button_up_cb, NULL);
     if (err != ESP_OK) {
         return err;
     }
@@ -864,59 +942,6 @@ static esp_err_t init_battery_refresh_timer(void)
     return esp_timer_start_periodic(s_battery_refresh_timer, BATTERY_REFRESH_FALLBACK_US);
 }
 
-static void IRAM_ATTR pmic_irq_isr(void *arg)
-{
-    (void)arg;
-    gpio_intr_disable(STICK_S3_PIN_PMIC_IRQ);
-
-    BaseType_t high_task_woken = pdFALSE;
-    queue_app_event_from_isr(APP_EVENT_POWER_IRQ, &high_task_woken);
-    if (high_task_woken) {
-        portYIELD_FROM_ISR();
-    }
-}
-
-static esp_err_t init_pmic_irq(void)
-{
-    gpio_config_t irq_config = {
-        .pin_bit_mask = 1ULL << STICK_S3_PIN_PMIC_IRQ,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    esp_err_t err = gpio_config(&irq_config);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = gpio_wakeup_enable(STICK_S3_PIN_PMIC_IRQ, GPIO_INTR_LOW_LEVEL);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    err = gpio_isr_handler_add(STICK_S3_PIN_PMIC_IRQ, pmic_irq_isr, NULL);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = gpio_set_intr_type(STICK_S3_PIN_PMIC_IRQ, GPIO_INTR_LOW_LEVEL);
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = gpio_intr_enable(STICK_S3_PIN_PMIC_IRQ);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    return ESP_OK;
-}
-
 static void update_battery_status(void)
 {
     uint8_t sys_status = 0;
@@ -990,13 +1015,16 @@ void app_main(void)
 
     update_battery_status();
     ESP_ERROR_CHECK(init_battery_refresh_timer());
-    ESP_ERROR_CHECK(init_pmic_irq());
 
-    ESP_LOGI(TAG, "configuring PMIC");
+    ESP_LOGI(TAG, "configuring power management");
+    /* Automatic light sleep must stay off on this board: it drops the
+     * internal USB-Serial-JTAG link, which carries both the console and the
+     * only USB interface, and it also parks the I2S clock while the battery
+     * alone is feeding the rail. */
     esp_pm_config_t pm_config = {
         .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
         .min_freq_mhz = CONFIG_XTAL_FREQ,
-        .light_sleep_enable = true,
+        .light_sleep_enable = false,
     };
     esp_pm_configure(&pm_config);
 }
